@@ -1,0 +1,11 @@
+{application, rebar_escript_plugin,
+ [{description, "A rebar plugin to package an application as escript."},
+  {id, "com.github.schlagert"},
+  {vsn, "0.0.1"},
+  {registered, []},
+  {applications,
+   [
+    kernel,
+    stdlib
+   ]},
+  {env, []}]}.
