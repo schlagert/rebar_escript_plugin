@@ -33,32 +33,33 @@
 
 %%------------------------------------------------------------------------------
 %% @doc
-%% Create a standalone escript of the application and its dependencies in the
+%% Create a standalone escript of an application and its dependencies in the
 %% project's base directory after compilation with `rebar compile'.
+%%
+%% All applications located in `deps_dir' and `lib_dirs' will be included. If
+%% not provided, the plugin will create a start module with a default `main/1'
+%% function which uses {@link application:ensure_all_started/2} to bootstrap
+%% the application.
 %% @end
 %%------------------------------------------------------------------------------
 -spec post_compile(rebar_config:config(), file:filename()) -> ok.
 post_compile(Config, AppFile) ->
-    case rebar_app_utils:is_app_dir() of
-        {true, AppFile} ->
+    case rebar_utils:processing_base_dir(Config) of
+        true ->
             TempDir = temp_dir(Config),
             ok = ensure_dir(TempDir),
-            ok = mk_link(TempDir, Config, AppFile),
-            case rebar_utils:processing_base_dir(Config) of
-                true ->
-                    {ok, Main} = check_main(Config, AppFile),
-                    Ez = create_ez(TempDir, Config, AppFile),
-                    ok = create_escript(Main, Ez, Config, AppFile);
-                false ->
-                    ok
-            end;
+            AppFiles = [AppFile | app_files(dep_dirs(Config))],
+            mk_links(TempDir, Config, AppFiles),
+            {ok, Main} = check_main(Config, AppFile),
+            Ez = create_ez(TempDir, Config, AppFile),
+            ok = create_escript(Main, Ez, Config, AppFile);
         false ->
             ok
     end.
 
 %%------------------------------------------------------------------------------
 %% @doc
-%% Remove the plugin's temporary directory after `rebar clean'.
+%% Remove the plugin's temporary directory and custom files after `rebar clean'.
 %% @end
 %%------------------------------------------------------------------------------
 -spec post_clean(rebar_config:config(), file:filename()) -> ok.
@@ -81,6 +82,20 @@ post_clean(Config, AppFile) ->
 %% @private
 %%------------------------------------------------------------------------------
 ensure_dir(Path) -> rebar_utils:ensure_dir(filename:join([Path, "dummy"])).
+
+%%------------------------------------------------------------------------------
+%% @private
+%%------------------------------------------------------------------------------
+app_files(DepDirs) ->
+    AppDirLists = [filelib:wildcard(filename:join([D, "*"])) || D <- DepDirs],
+    [AppFile || AppDir <- lists:append(AppDirLists),
+                {true, AppFile} <- [rebar_app_utils:is_app_dir(AppDir)]].
+
+%%------------------------------------------------------------------------------
+%% @private
+%%------------------------------------------------------------------------------
+mk_links(TempDir, Config, AppFiles) ->
+    [ok = mk_link(TempDir, Config, AppFile) || AppFile <- AppFiles].
 
 %%------------------------------------------------------------------------------
 %% @private
@@ -139,6 +154,15 @@ app_link(TempDir, Config, AppFile) ->
 %% @private
 %%------------------------------------------------------------------------------
 temp_dir(Config) -> filename:join([rebar_utils:base_dir(Config), ?TEMP_DIR]).
+
+%%------------------------------------------------------------------------------
+%% @private
+%%------------------------------------------------------------------------------
+dep_dirs(Config) ->
+    BaseDir = rebar_utils:base_dir(Config),
+    {true, DepsDir} = rebar_deps:get_deps_dir(Config),
+    LibDirs = rebar_config:get_local(Config, lib_dirs, []),
+    [DepsDir | [filename:join([BaseDir, Dir]) || Dir <- LibDirs]].
 
 %%------------------------------------------------------------------------------
 %% @private
@@ -220,7 +244,7 @@ create_main(Module, AppName) ->
                     "main([]) ->"
                     ++ "    {ok, _} = application:ensure_all_started("
                     ++ atom_to_list(AppName)
-                    ++ "),"
+                    ++ ", permanent),"
                     ++ "    timer:sleep(infinity)."),
     {ok, F1} = erl_parse:parse_form(T1),
     {ok, F2} = erl_parse:parse_form(T2),
