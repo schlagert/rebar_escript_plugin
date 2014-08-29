@@ -23,7 +23,7 @@
          post_clean/2]).
 
 -define(TEMP_DIR, ".escript").
--define(START_MODULE, rebar_escript_plugin_starter).
+-define(MAIN_MODULE, rebar_escript_plugin_main).
 
 -include_lib("kernel/include/file.hrl").
 
@@ -47,12 +47,13 @@ post_compile(Config, AppFile) ->
     case rebar_utils:processing_base_dir(Config) of
         true ->
             TempDir = temp_dir(Config),
-            ok = ensure_dir(TempDir),
+            ok = rebar_utils:ensure_dir(filename:join([TempDir, "dummy"])),
             AppFiles = [AppFile | app_files(dep_dirs(Config))],
-            mk_links(TempDir, Config, AppFiles),
-            {ok, Main} = check_main(Config, AppFile),
+            PackagedApps = mk_links(TempDir, Config, AppFiles),
+            ok = prepare_runner_module(),
+            ok = prepare_main_module(app_name(Config, AppFile), PackagedApps),
             Ez = create_ez(TempDir, Config, AppFile),
-            ok = create_escript(Main, Ez, Config, AppFile);
+            ok = create_escript(Ez, Config, AppFile);
         false ->
             ok
     end.
@@ -68,7 +69,8 @@ post_clean(Config, AppFile) ->
         true  ->
             {OsFamily, _OsName} = os:type(),
             rm_rf(temp_dir(Config)),
-            rm_rf(main_path(?START_MODULE)),
+            rm_rf(main_path(rebar_escript_plugin_runner)),
+            rm_rf(main_path(?MAIN_MODULE)),
             rm_rf(escript_path(OsFamily, Config, AppFile));
         false ->
             ok
@@ -80,33 +82,37 @@ post_clean(Config, AppFile) ->
 
 %%------------------------------------------------------------------------------
 %% @private
-%%------------------------------------------------------------------------------
-ensure_dir(Path) -> rebar_utils:ensure_dir(filename:join([Path, "dummy"])).
-
-%%------------------------------------------------------------------------------
-%% @private
+%% Searches the given list of `lib' and `deps' directories for `.app' files,
+%% excluding system applications and the plugin itself.
 %%------------------------------------------------------------------------------
 app_files(DepDirs) ->
+    ExcludedApps = excluded_apps(),
     AppDirLists = [filelib:wildcard(filename:join([D, "*"])) || D <- DepDirs],
     [AppFile || AppDir <- lists:append(AppDirLists),
-                {true, AppFile} <- [rebar_app_utils:is_app_dir(AppDir)]].
+                {true, AppFile} <- [rebar_app_utils:is_app_dir(AppDir)],
+                may_include(strip_extension(AppFile), ExcludedApps)].
 
 %%------------------------------------------------------------------------------
 %% @private
+%% Creates links to the application directories corresponding to the given list
+%% of `.app' files in a temporary directory. This is needed to get the directory
+%% structure desired by the code server for the created `.ez' archive.
 %%------------------------------------------------------------------------------
 mk_links(TempDir, Config, AppFiles) ->
-    [ok = mk_link(TempDir, Config, AppFile) || AppFile <- AppFiles].
+    [mk_link(TempDir, Config, AppFile) || AppFile <- AppFiles].
 
 %%------------------------------------------------------------------------------
 %% @private
+%% Creates a link to the application directory corresponding to the given
+%% `.app' file.
 %%------------------------------------------------------------------------------
 mk_link(TempDir, Config, AppFile) ->
     LinkName = app_link(TempDir, Config, AppFile),
     case file:make_symlink(app_dir(AppFile), LinkName) of
         ok ->
-            ok;
+            app_name(Config, AppFile);
         {error, eexist} ->
-            ok;
+            app_name(Config, AppFile);
         Error ->
             Error
     end.
@@ -118,6 +124,8 @@ rm_rf(Path) -> rebar_file_utils:rm_rf(Path).
 
 %%------------------------------------------------------------------------------
 %% @private
+%% Returns the path to an application directory, based on the path to its
+%% `.app' file.
 %%------------------------------------------------------------------------------
 app_dir(AppFile) ->
     SplittedPath = filename:split(filename:absname(AppFile)),
@@ -157,6 +165,9 @@ temp_dir(Config) -> filename:join([rebar_utils:base_dir(Config), ?TEMP_DIR]).
 
 %%------------------------------------------------------------------------------
 %% @private
+%% Returns a list of the `lib' and `deps' directories used by the current
+%% project/application. This includes the path configured as `deps_dir' and the
+%% paths specified as `lib_dirs' in the `rebar.config' file.
 %%------------------------------------------------------------------------------
 dep_dirs(Config) ->
     BaseDir = rebar_utils:base_dir(Config),
@@ -166,23 +177,19 @@ dep_dirs(Config) ->
 
 %%------------------------------------------------------------------------------
 %% @private
-%%------------------------------------------------------------------------------
-check_main(Config, AppFile) ->
-    AppName = app_name(Config, AppFile),
-    case code:ensure_loaded(AppName) of
-        {module, AppName} ->
-            case erlang:function_exported(AppName, main, 1) of
-                true ->
-                    {ok, AppName};
-                false ->
-                    {create_main(?START_MODULE, AppName), ?START_MODULE}
-            end;
-        _ ->
-            {create_main(?START_MODULE, AppName), ?START_MODULE}
-    end.
-
-%%------------------------------------------------------------------------------
-%% @private
+%% Creates an `.ez' archive (in memory) to be embedded in the escript. The
+%% archive will contain `ebin' and `priv' directories of all dependent
+%% applications. The archive will have the following content layout:
+%%
+%% application-version.ez
+%%  + application-version/ebin
+%%  + application-version/priv
+%%  + dependency1-version/ebin
+%%  + dependency1-version/priv
+%%  + dependency2-version/ebin
+%%  + dependency2-version/priv
+%%  + ...
+%%
 %%------------------------------------------------------------------------------
 create_ez(TempDir, Config, AppFile) ->
     {ok, {_, Archive}} =
@@ -194,6 +201,8 @@ create_ez(TempDir, Config, AppFile) ->
 
 %%------------------------------------------------------------------------------
 %% @private
+%% Returns the path to the escript to create. On windows systems the file will
+%% have the extension `.escript', unix systems will omit the extension.
 %%------------------------------------------------------------------------------
 escript_path(OsFamily, Config, AppFile) ->
     AppName = atom_to_list(app_name(Config, AppFile)),
@@ -203,13 +212,19 @@ escript_path(OsFamily, Config, AppFile) ->
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
-create_escript(Main, Ez, Config, AppFile) ->
+create_escript(Ez, Config, AppFile) ->
     {OsFamily, _OsName} = os:type(),
     EScript = escript_path(OsFamily, Config, AppFile),
-    EmuArgs = "-escript main " ++ atom_to_list(Main),
+    MainArg = "-escript main " ++ atom_to_list(?MAIN_MODULE),
+    EmuArgs = MainArg ++ " " ++ get_emu_args(Config),
     Sections = [shebang, comment, {emu_args, EmuArgs}, {archive, Ez}],
     ok = escript:create(EScript, Sections),
     ok = set_executable(OsFamily, EScript).
+
+%%------------------------------------------------------------------------------
+%% @private
+%%------------------------------------------------------------------------------
+strip_extension(FilePath) -> filename:rootname(filename:basename(FilePath)).
 
 %%------------------------------------------------------------------------------
 %% @private
@@ -236,18 +251,63 @@ main_path(Module) ->
 
 %%------------------------------------------------------------------------------
 %% @private
+%% Writes the code of the runner module into the `ebin' directory of the
+%% application to package. This code will be needed at runtime to setup the
+%% correct environment.
 %%------------------------------------------------------------------------------
-create_main(Module, AppName) ->
-    {ok, T1, _} = erl_scan:string("-module(" ++ atom_to_list(Module) ++ ")."),
+prepare_runner_module() ->
+    Module = rebar_escript_plugin_runner,
+    {Module, Binary, _} = code:get_object_code(Module),
+    ok = file:write_file(main_path(Module), Binary).
+
+%%------------------------------------------------------------------------------
+%% @private
+%% Generates and writes the code of the main module into the `ebin' directory
+%% of the application to package. This code provides the main entry point for
+%% escript execution (it provides the `main/1' function).
+%%------------------------------------------------------------------------------
+prepare_main_module(AppName, PackagedApps) ->
+    {ok, T1, _} = erl_scan:string(
+                    "-module("
+                    ++ atom_to_list(?MAIN_MODULE)
+                    ++ ")."),
     {ok, T2, _} = erl_scan:string("-export([main/1])."),
     {ok, T3, _} = erl_scan:string(
-                    "main([]) ->"
-                    ++ "    {ok, _} = application:ensure_all_started("
+                    "main(Args) ->"
+                    "    rebar_escript_plugin_runner:main("
                     ++ atom_to_list(AppName)
-                    ++ ", permanent),"
-                    ++ "    timer:sleep(infinity)."),
+                    ++ ", Args, "
+                    ++ lists:flatten(io_lib:format("~w", [PackagedApps]))
+                    ++ ")."),
     {ok, F1} = erl_parse:parse_form(T1),
     {ok, F2} = erl_parse:parse_form(T2),
     {ok, F3} = erl_parse:parse_form(T3),
-    {ok, Module, Binary} = compile:forms([F1, F2, F3]),
-    ok = file:write_file(main_path(Module), Binary).
+    {ok, ?MAIN_MODULE, Binary} = compile:forms([F1, F2, F3]),
+    ok = file:write_file(main_path(?MAIN_MODULE), Binary).
+
+%%------------------------------------------------------------------------------
+%% @private
+%% Returns a custom emulator argument string, if one. Please note that the
+%% `-escript main' parameter is forbidden. It must point to the internal
+%% generated module. Otherwise the execution environment will not be setup
+%% correctly.
+%%------------------------------------------------------------------------------
+get_emu_args(Config) ->
+    Cfg = rebar_config:get(Config, ?MODULE, []),
+    case proplists:get_value(emu_args, Cfg, "") of
+        EmuArgs when is_list(EmuArgs) -> EmuArgs
+    end.
+
+%%------------------------------------------------------------------------------
+%% @private
+%%------------------------------------------------------------------------------
+may_include(AppStr, ExcludedApps) ->
+    lists:all(fun(App) -> string:str(App, AppStr) =:= 0 end, ExcludedApps).
+
+%%------------------------------------------------------------------------------
+%% @private
+%% Returns a list of strings representing applications to exclude from
+%% packaging.
+%%------------------------------------------------------------------------------
+excluded_apps() ->
+    [atom_to_list(?MODULE) | filelib:wildcard("*", code:lib_dir())].
