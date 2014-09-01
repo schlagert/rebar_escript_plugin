@@ -14,6 +14,13 @@
 %%% OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 %%%
 %%% @doc
+%%% A `rebar' plugin to package applications or releases as executable escript
+%%% similar to `rebar escriptize' but without its limitations. The plugin
+%%% automatically executes as `post_compile' or `post_generate' hook.
+%%% To use it specify it in the `plugins' section of your project's
+%%% `rebar.config', e.g. `{plugins, [rebar_escript_plugin]}.'
+%%% Depending on your preference put the plugin somewhere into your code path
+%%% or simply include it as project dependency.
 %%% @end
 %%%=============================================================================
 -module(rebar_escript_plugin).
