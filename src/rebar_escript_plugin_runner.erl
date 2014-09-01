@@ -42,16 +42,20 @@
 %% module is the module with the name of the application to start.
 %%
 %% `priv' directory content is made available by extracting it prior to starting
-%% the applications to a temporary directory. Due to the lack of signal handlers
-%% this directory cannot be deleted on program exit. The `code_path_choice'
-%% parameter of the code server has to be set to `relaxed' (which is the default
-%% anyways) for this to work.
+%% the applications to a temporary directory. The heart mechanism is used to
+%% make sure the temporary files are cleaned on program exit. Regardless, heart
+%% can still be used to restart the node, since the `HEART_COMMAND' environment
+%% variable will still be queried (and executed) on node death. The
+%% `code_path_choice' parameter of the code server has to be set to `relaxed'
+%% (which is the default anyways) for this to work.
 %%
 %% @see http://www.erlang.org/doc/man/code.html
 %% @end
 %%------------------------------------------------------------------------------
 main(App, Args, PackagedApps) ->
-    TempDir = mk_temp(App),
+    {OsFamily, _OsName} = os:type(),
+    TempDir = mk_temp(OsFamily, App),
+    setup_heart(OsFamily, TempDir),
     [prim_cp_priv_dir(TempDir, Packaged) || Packaged <- PackagedApps],
     NewPaths = filelib:wildcard(filename:join([TempDir, "*"])),
     true = code:set_path(NewPaths ++ code:get_path()),
@@ -94,16 +98,41 @@ default_main(App) ->
 %% Create and return a directory in the system specific temporary directory. If
 %% the directory already exists it will be deleted beforehand.
 %%------------------------------------------------------------------------------
-mk_temp(App) ->
-    {OsFamily, _OsName} = os:type(),
-    TempDir = mk_temp(OsFamily, ?TMP(App)),
+mk_temp(OsFamily, App) ->
+    TempDir = filename:join([get_tmp(OsFamily), ?TMP(App)]),
     rm_rf(TempDir),
     ok = file:make_dir(TempDir),
     TempDir.
-mk_temp(unix, Folder) ->
-    filename:join(["/", "tmp", Folder]);
-mk_temp(OsFamily, Folder) when OsFamily =:= nt; OsFamily =:= windows ->
-    filename:join([os:getenv("TEMP"), Folder]).
+
+%%------------------------------------------------------------------------------
+%% @private
+%%------------------------------------------------------------------------------
+get_tmp(OsFamily) when OsFamily =:= nt; OsFamily =:= windows ->
+    os:getenv("TEMP");
+get_tmp(_OsFamily) ->
+    filename:join(["/", "tmp"]).
+
+%%------------------------------------------------------------------------------
+%% @private
+%% Setup a temporary heart command that cleans up the given temporary directory
+%% on node death *before* executing the restart command specified in the
+%% `HEART_COMMAND' environment variable.
+%%------------------------------------------------------------------------------
+setup_heart(OsFamily, TempDir) ->
+    case os:getenv("HEART_COMMAND") of
+        "" ->
+            HeartCmd = "";
+        Cmd when OsFamily =:= nt; OsFamily =:= windows ->
+            HeartCmd = " & " ++ Cmd;
+        Cmd ->
+            HeartCmd = " ; " ++ Cmd
+    end,
+    case OsFamily of
+        _ when OsFamily =:= nt; OsFamily =:= windows ->
+            ok = heart:set_cmd("rmdir \"" ++ TempDir ++ "\" /s /q" ++ HeartCmd);
+        _ ->
+            ok = heart:set_cmd("rm -rf '" ++ TempDir ++ "'" ++ HeartCmd)
+    end.
 
 %%------------------------------------------------------------------------------
 %% @private

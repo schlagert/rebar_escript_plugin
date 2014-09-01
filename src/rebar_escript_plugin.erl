@@ -215,8 +215,9 @@ escript_path(OsFamily, Config, AppFile) ->
 create_escript(Ez, Config, AppFile) ->
     {OsFamily, _OsName} = os:type(),
     EScript = escript_path(OsFamily, Config, AppFile),
+    HeartArg = "-heart",
     MainArg = "-escript main " ++ atom_to_list(?MAIN_MODULE),
-    EmuArgs = MainArg ++ " " ++ get_emu_args(Config),
+    EmuArgs = HeartArg ++ MainArg ++ " " ++ get_emu_args(Config),
     Sections = [shebang, comment, {emu_args, EmuArgs}, {archive, Ez}],
     ok = escript:create(EScript, Sections),
     ok = set_executable(OsFamily, EScript).
@@ -290,7 +291,8 @@ prepare_main_module(AppName, PackagedApps) ->
 %% Returns a custom emulator argument string, if one. Please note that the
 %% `-escript main' parameter is forbidden. It must point to the internal
 %% generated module. Otherwise the execution environment will not be setup
-%% correctly.
+%% correctly. Additionally, the `-heart' parameter is always set (for cleanup)
+%% and it is therefore not necessary to specify it.
 %%------------------------------------------------------------------------------
 get_emu_args(Config) ->
     Cfg = rebar_config:get(Config, ?MODULE, []),
