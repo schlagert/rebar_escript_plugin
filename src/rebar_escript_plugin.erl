@@ -44,17 +44,22 @@
 %%------------------------------------------------------------------------------
 -spec post_compile(rebar_config:config(), file:filename()) -> ok.
 post_compile(Config, AppFile) ->
-    case rebar_utils:processing_base_dir(Config) of
-        true ->
-            TempDir = temp_dir(Config),
+    IsBaseDir = rebar_utils:processing_base_dir(Config),
+    IsAppDir = rebar_app_utils:is_app_dir(),
+    IsRelDir = rebar_rel_utils:is_rel_dir(),
+    case {IsBaseDir, IsAppDir, IsRelDir} of
+        {true, {true, AppFile}, false} ->
+            BaseDir = rebar_utils:base_dir(Config),
+            TempDir = temp_dir(BaseDir),
             ok = rebar_utils:ensure_dir(filename:join([TempDir, "dummy"])),
-            AppFiles = [AppFile | app_files(dep_dirs(Config))],
+            AppFiles = [AppFile | app_files(dep_dirs(BaseDir, Config))],
             PackagedApps = mk_links(TempDir, Config, AppFiles),
-            ok = prepare_runner_module(),
-            ok = prepare_main_module(app_name(Config, AppFile), PackagedApps),
+            ok = prepare_runner_module(TempDir),
+            AppName = app_name(Config, AppFile),
+            ok = prepare_main_module(TempDir, AppName, PackagedApps),
             Ez = create_ez(TempDir, Config, AppFile),
-            ok = create_escript(Ez, Config, AppFile);
-        false ->
+            ok = create_escript(Ez, BaseDir, Config, AppFile);
+        _ ->
             ok
     end.
 
@@ -66,12 +71,11 @@ post_compile(Config, AppFile) ->
 -spec post_clean(rebar_config:config(), file:filename()) -> ok.
 post_clean(Config, AppFile) ->
     case rebar_utils:processing_base_dir(Config) of
-        true  ->
+        true when is_list(AppFile) ->
             {OsFamily, _OsName} = os:type(),
-            rm_rf(temp_dir(Config)),
-            rm_rf(main_path(rebar_escript_plugin_runner)),
-            rm_rf(main_path(?MAIN_MODULE)),
-            rm_rf(escript_path(OsFamily, Config, AppFile));
+            BaseDir = rebar_utils:base_dir(Config),
+            rm_rf(temp_dir(BaseDir)),
+            rm_rf(escript_path(OsFamily, BaseDir, Config, AppFile));
         false ->
             ok
     end.
@@ -161,7 +165,7 @@ app_link(TempDir, Config, AppFile) ->
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
-temp_dir(Config) -> filename:join([rebar_utils:base_dir(Config), ?TEMP_DIR]).
+temp_dir(BaseDir) -> filename:join([BaseDir, ?TEMP_DIR]).
 
 %%------------------------------------------------------------------------------
 %% @private
@@ -169,8 +173,7 @@ temp_dir(Config) -> filename:join([rebar_utils:base_dir(Config), ?TEMP_DIR]).
 %% project/application. This includes the path configured as `deps_dir' and the
 %% paths specified as `lib_dirs' in the `rebar.config' file.
 %%------------------------------------------------------------------------------
-dep_dirs(Config) ->
-    BaseDir = rebar_utils:base_dir(Config),
+dep_dirs(BaseDir, Config) ->
     {true, DepsDir} = rebar_deps:get_deps_dir(Config),
     LibDirs = rebar_config:get_local(Config, lib_dirs, []),
     [DepsDir | [filename:join([BaseDir, Dir]) || Dir <- LibDirs]].
@@ -182,6 +185,8 @@ dep_dirs(Config) ->
 %% applications. The archive will have the following content layout:
 %%
 %% application-version.ez
+%%  + rebar_escript_plugin_main.beam
+%%  + rebar_escript_plugin_runner.beam
 %%  + application-version/ebin
 %%  + application-version/priv
 %%  + dependency1-version/ebin
@@ -195,7 +200,8 @@ create_ez(TempDir, Config, AppFile) ->
     {ok, {_, Archive}} =
         zip:create(
           app_name_and_vsn(Config, AppFile) ++ ".ez",
-          filelib:wildcard(filename:join(["*", "{ebin,priv}"]), TempDir),
+          filelib:wildcard(filename:join(["*", "{ebin,priv}"]), TempDir) ++
+              filelib:wildcard("*.beam", TempDir),
           [{cwd, TempDir}, {uncompress, all}, memory]),
     Archive.
 
@@ -204,17 +210,17 @@ create_ez(TempDir, Config, AppFile) ->
 %% Returns the path to the escript to create. On windows systems the file will
 %% have the extension `.escript', unix systems will omit the extension.
 %%------------------------------------------------------------------------------
-escript_path(OsFamily, Config, AppFile) ->
+escript_path(OsFamily, BaseDir, Config, AppFile) ->
     AppName = atom_to_list(app_name(Config, AppFile)),
     Extension = escript_extension(OsFamily),
-    filename:join([rebar_utils:base_dir(Config), AppName ++ Extension]).
+    filename:join([BaseDir, AppName ++ Extension]).
 
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
-create_escript(Ez, Config, AppFile) ->
+create_escript(Ez, BaseDir, Config, AppFile) ->
     {OsFamily, _OsName} = os:type(),
-    EScript = escript_path(OsFamily, Config, AppFile),
+    EScript = escript_path(OsFamily, BaseDir, Config, AppFile),
     HeartArg = "-heart",
     MainArg = "-escript main " ++ atom_to_list(?MAIN_MODULE),
     EmuArgs = string:join([HeartArg, MainArg, get_emu_args(Config)], " "),
@@ -247,27 +253,26 @@ set_executable(_, _EScript) ->
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
-main_path(Module) ->
-    filename:join([rebar_utils:ebin_dir(), atom_to_list(Module) ++ ".beam"]).
+main_path(TempDir, Module) ->
+    filename:join([TempDir, atom_to_list(Module) ++ ".beam"]).
 
 %%------------------------------------------------------------------------------
 %% @private
-%% Writes the code of the runner module into the `ebin' directory of the
-%% application to package. This code will be needed at runtime to setup the
-%% correct environment.
+%% Writes the code of the runner module into the temporary plugin directory.
+%% This code will be needed at runtime to setup the correct environment.
 %%------------------------------------------------------------------------------
-prepare_runner_module() ->
+prepare_runner_module(TempDir) ->
     Module = rebar_escript_plugin_runner,
     {Module, Binary, _} = code:get_object_code(Module),
-    ok = file:write_file(main_path(Module), Binary).
+    ok = file:write_file(main_path(TempDir, Module), Binary).
 
 %%------------------------------------------------------------------------------
 %% @private
-%% Generates and writes the code of the main module into the `ebin' directory
-%% of the application to package. This code provides the main entry point for
-%% escript execution (it provides the `main/1' function).
+%% Generates and writes the code of the main module into the temporary plugin
+%% directory. This code provides the main entry point for escript execution (it
+%% provides the `main/1' function).
 %%------------------------------------------------------------------------------
-prepare_main_module(AppName, PackagedApps) ->
+prepare_main_module(TempDir, AppName, PackagedApps) ->
     {ok, T1, _} = erl_scan:string(
                     "-module("
                     ++ atom_to_list(?MAIN_MODULE)
@@ -284,7 +289,7 @@ prepare_main_module(AppName, PackagedApps) ->
     {ok, F2} = erl_parse:parse_form(T2),
     {ok, F3} = erl_parse:parse_form(T3),
     {ok, ?MAIN_MODULE, Binary} = compile:forms([F1, F2, F3]),
-    ok = file:write_file(main_path(?MAIN_MODULE), Binary).
+    ok = file:write_file(main_path(TempDir, ?MAIN_MODULE), Binary).
 
 %%------------------------------------------------------------------------------
 %% @private
