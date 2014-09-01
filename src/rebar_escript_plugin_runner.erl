@@ -28,8 +28,6 @@
 %% API
 -export([main/3]).
 
--define(TMP(Atom), atom_to_list(Atom) ++ "_lib_dir").
-
 %%%=============================================================================
 %%% API
 %%%=============================================================================
@@ -39,7 +37,8 @@
 %% Called from the generated escript main module. This is needed to make `priv'
 %% directories available to the applications the usual way. If present, the
 %% execution is delegated to the the main module's `main/1' function. The main
-%% module is the module with the name of the application to start.
+%% module is the module with the name of the application to start (in case
+%% there is only one application to be started).
 %%
 %% `priv' directory content is made available by extracting it prior to starting
 %% the applications to a temporary directory. The heart mechanism is used to
@@ -52,14 +51,14 @@
 %% @see http://www.erlang.org/doc/man/code.html
 %% @end
 %%------------------------------------------------------------------------------
-main(App, Args, PackagedApps) ->
+main(AppsToStart, Args, PackagedApps) ->
     {OsFamily, _OsName} = os:type(),
-    TempDir = mk_temp(OsFamily, App),
+    TempDir = mk_temp(OsFamily),
     setup_heart(OsFamily, TempDir),
     [prim_cp_priv_dir(TempDir, Packaged) || Packaged <- PackagedApps],
     NewPaths = filelib:wildcard(filename:join([TempDir, "*"])),
     true = code:set_path(NewPaths ++ code:get_path()),
-    invoke_main(App, Args).
+    invoke_main(AppsToStart, Args).
 
 %%%=============================================================================
 %%% Internal functions
@@ -68,29 +67,32 @@ main(App, Args, PackagedApps) ->
 %%------------------------------------------------------------------------------
 %% @private
 %% Searches for a `main/1' function in the module with the name of the given
-%% application and calls it. If there is no such function a default main
-%% function is used to start all needed applications.
+%% application (if only one) and calls it. If there is no such function or
+%% multiple applications need to be started, a default main function is used
+%% that starts everything including dependency applications.
 %%------------------------------------------------------------------------------
-invoke_main(App, Args) ->
+invoke_main(Apps = [App], Args) ->
     case code:ensure_loaded(App) of
         {module, App} ->
             case erlang:function_exported(App, main, 1) of
                 true ->
                     App:main(Args);
                 false ->
-                    default_main(App)
+                    default_main(Apps)
             end;
         _ ->
-            default_main(App)
-    end.
+            default_main(Apps)
+    end;
+invoke_main(Apps, _Args) ->
+    default_main(Apps).
 
 %%------------------------------------------------------------------------------
 %% @private
-%% Starts an application along with its dependency applications and blocks the
-%% calling process infinitely.
+%% Starts the given list of applications along with their dependency
+%% applications and blocks the calling process infinitely.
 %%------------------------------------------------------------------------------
-default_main(App) ->
-    {ok, _} = application:ensure_all_started(App, permanent),
+default_main(Apps) ->
+    [{ok, _} = application:ensure_all_started(App, permanent) || App <- Apps],
     timer:sleep(infinity).
 
 %%------------------------------------------------------------------------------
@@ -98,8 +100,9 @@ default_main(App) ->
 %% Create and return a directory in the system specific temporary directory. If
 %% the directory already exists it will be deleted beforehand.
 %%------------------------------------------------------------------------------
-mk_temp(OsFamily, App) ->
-    TempDir = filename:join([get_tmp(OsFamily), ?TMP(App)]),
+mk_temp(OsFamily) ->
+    EScript = filename:basename(escript:script_name()),
+    TempDir = filename:join([get_tmp(OsFamily), EScript]),
     rm_rf(TempDir),
     ok = file:make_dir(TempDir),
     TempDir.

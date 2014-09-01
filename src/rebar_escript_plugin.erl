@@ -20,6 +20,7 @@
 
 %% API
 -export([post_compile/2,
+         post_generate/2,
          post_clean/2]).
 
 -define(TEMP_DIR, ".escript").
@@ -52,13 +53,37 @@ post_compile(Config, AppFile) ->
             BaseDir = rebar_utils:base_dir(Config),
             TempDir = temp_dir(BaseDir),
             ok = rebar_utils:ensure_dir(filename:join([TempDir, "dummy"])),
+            ok = prepare_runner_module(TempDir),
+            AppsToStart = [AppName] = [app_name(Config, AppFile)],
             AppFiles = [AppFile | app_files(dep_dirs(BaseDir, Config))],
             PackagedApps = mk_links(TempDir, Config, AppFiles),
-            ok = prepare_runner_module(TempDir),
-            AppName = app_name(Config, AppFile),
-            ok = prepare_main_module(TempDir, AppName, PackagedApps),
-            Ez = create_ez(TempDir, Config, AppFile),
-            ok = create_escript(Ez, BaseDir, Config, AppFile);
+            ok = prepare_main_module(TempDir, AppsToStart, PackagedApps),
+            Ez = create_ez(TempDir, Config, AppFile, PackagedApps),
+            ok = create_escript(Ez, BaseDir, Config, atom_to_list(AppName));
+        _ ->
+            ok
+    end.
+
+%%------------------------------------------------------------------------------
+%% @doc
+%% Create a standalone escript of a release in the release's base directory
+%% after generation with `rebar generate'.
+%% @end
+%%------------------------------------------------------------------------------
+-spec post_generate(rebar_config:config(), file:filename()) -> ok.
+post_generate(Config, RelToolFile) ->
+    case rebar_rel_utils:is_rel_dir() of
+        {true, RelToolFile} ->
+            BaseDir = filename:dirname(RelToolFile),
+            RelToolConfig = reltool_cfg(Config, RelToolFile),
+            {RelFile, LibDir} = reltool_info(Config, RelToolConfig),
+            ok = prepare_runner_module(LibDir),
+            {RelName, AppsToStart} = rel_info(RelFile),
+            AppFiles = [AppFile | _] = app_files([LibDir]),
+            PackagedApps = [app_name(Config, AppF) || AppF <- AppFiles],
+            ok = prepare_main_module(LibDir, AppsToStart, PackagedApps),
+            Ez = create_ez(LibDir, Config, AppFile, PackagedApps),
+            ok = create_escript(Ez, BaseDir, Config, RelName);
         _ ->
             ok
     end.
@@ -69,14 +94,27 @@ post_compile(Config, AppFile) ->
 %% @end
 %%------------------------------------------------------------------------------
 -spec post_clean(rebar_config:config(), file:filename()) -> ok.
-post_clean(Config, AppFile) ->
-    case rebar_utils:processing_base_dir(Config) of
-        true when is_list(AppFile) ->
+post_clean(Config, ResourceFile) ->
+    IsBaseDir = rebar_utils:processing_base_dir(Config),
+    IsAppDir = rebar_app_utils:is_app_dir(),
+    IsRelDir = rebar_rel_utils:is_rel_dir(),
+    case {IsBaseDir, IsAppDir, IsRelDir} of
+        {true, {true, AppFile}, false} when AppFile =:= ResourceFile ->
             {OsFamily, _OsName} = os:type(),
             BaseDir = rebar_utils:base_dir(Config),
             rm_rf(temp_dir(BaseDir)),
-            rm_rf(escript_path(OsFamily, BaseDir, Config, AppFile));
-        false ->
+            AppName = atom_to_list(app_name(Config, AppFile)),
+            rm_rf(escript_path(OsFamily, BaseDir, AppName));
+        {_, false, {true, RelToolFile}} when RelToolFile =:= ResourceFile ->
+            {OsFamily, _OsName} = os:type(),
+            BaseDir = filename:dirname(RelToolFile),
+            RelToolConfig = reltool_cfg(Config, RelToolFile),
+            {RelFile, LibDir} = reltool_info(Config, RelToolConfig),
+            {RelName, _AppsToStart} = rel_info(RelFile),
+            rm_rf(main_path(LibDir, ?MAIN_MODULE)),
+            rm_rf(main_path(LibDir, rebar_escript_plugin_runner)),
+            rm_rf(escript_path(OsFamily, BaseDir, RelName));
+        _ ->
             ok
     end.
 
@@ -165,6 +203,29 @@ app_link(TempDir, Config, AppFile) ->
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
+reltool_cfg(Config, RelToolFile) ->
+    element(2, rebar_rel_utils:load_config(Config, RelToolFile)).
+
+%%------------------------------------------------------------------------------
+%% @private
+%% Return the paths to the releases `.rel' file and its `lib' directory.
+%%------------------------------------------------------------------------------
+reltool_info(Config, RelToolConfig) ->
+    {Name, Version} = rebar_rel_utils:get_reltool_release_info(RelToolConfig),
+    TargetDir = rebar_rel_utils:get_target_dir(Config, RelToolConfig),
+    {filename:join([TargetDir, "releases", Version, Name ++ ".rel"]),
+     filename:join([TargetDir, "lib"])}.
+
+%%------------------------------------------------------------------------------
+%% @private
+%%------------------------------------------------------------------------------
+rel_info(RelFile) ->
+    {ok, [{release, {RelName, _}, _, Apps}]} = file:consult(RelFile),
+    {RelName, [App || {App, _Version} <- Apps]}.
+
+%%------------------------------------------------------------------------------
+%% @private
+%%------------------------------------------------------------------------------
 temp_dir(BaseDir) -> filename:join([BaseDir, ?TEMP_DIR]).
 
 %%------------------------------------------------------------------------------
@@ -196,11 +257,13 @@ dep_dirs(BaseDir, Config) ->
 %%  + ...
 %%
 %%------------------------------------------------------------------------------
-create_ez(TempDir, Config, AppFile) ->
+create_ez(TempDir, Config, AppFile, PackagedApps) ->
+    Apps = string:join([atom_to_list(App) || App <- PackagedApps], ","),
+    Paths = filename:join(["{" ++ Apps ++ "}-*", "{ebin,priv}"]),
     {ok, {_, Archive}} =
         zip:create(
           app_name_and_vsn(Config, AppFile) ++ ".ez",
-          filelib:wildcard(filename:join(["*", "{ebin,priv}"]), TempDir) ++
+          filelib:wildcard(Paths, TempDir) ++
               filelib:wildcard("*.beam", TempDir),
           [{cwd, TempDir}, {uncompress, all}, memory]),
     Archive.
@@ -210,23 +273,22 @@ create_ez(TempDir, Config, AppFile) ->
 %% Returns the path to the escript to create. On windows systems the file will
 %% have the extension `.escript', unix systems will omit the extension.
 %%------------------------------------------------------------------------------
-escript_path(OsFamily, BaseDir, Config, AppFile) ->
-    AppName = atom_to_list(app_name(Config, AppFile)),
+escript_path(OsFamily, BaseDir, EScript) ->
     Extension = escript_extension(OsFamily),
-    filename:join([BaseDir, AppName ++ Extension]).
+    filename:join([BaseDir, EScript ++ Extension]).
 
 %%------------------------------------------------------------------------------
 %% @private
 %%------------------------------------------------------------------------------
-create_escript(Ez, BaseDir, Config, AppFile) ->
+create_escript(Ez, BaseDir, Config, EScript) ->
     {OsFamily, _OsName} = os:type(),
-    EScript = escript_path(OsFamily, BaseDir, Config, AppFile),
+    Path = escript_path(OsFamily, BaseDir, EScript),
     HeartArg = "-heart",
     MainArg = "-escript main " ++ atom_to_list(?MAIN_MODULE),
     EmuArgs = string:join([HeartArg, MainArg, get_emu_args(Config)], " "),
     Sections = [shebang, comment, {emu_args, EmuArgs}, {archive, Ez}],
-    ok = escript:create(EScript, Sections),
-    ok = set_executable(OsFamily, EScript).
+    ok = escript:create(Path, Sections),
+    ok = set_executable(OsFamily, Path).
 
 %%------------------------------------------------------------------------------
 %% @private
@@ -272,7 +334,7 @@ prepare_runner_module(TempDir) ->
 %% directory. This code provides the main entry point for escript execution (it
 %% provides the `main/1' function).
 %%------------------------------------------------------------------------------
-prepare_main_module(TempDir, AppName, PackagedApps) ->
+prepare_main_module(TempDir, AppsToStart, PackagedApps) ->
     {ok, T1, _} = erl_scan:string(
                     "-module("
                     ++ atom_to_list(?MAIN_MODULE)
@@ -281,7 +343,7 @@ prepare_main_module(TempDir, AppName, PackagedApps) ->
     {ok, T3, _} = erl_scan:string(
                     "main(Args) ->"
                     "    rebar_escript_plugin_runner:main("
-                    ++ atom_to_list(AppName)
+                    ++ lists:flatten(io_lib:format("~w", [AppsToStart]))
                     ++ ", Args, "
                     ++ lists:flatten(io_lib:format("~w", [PackagedApps]))
                     ++ ")."),
