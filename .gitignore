@@ -1,2 +1,6 @@
+*.beam
+
 .rebar
+.eunit
 ebin
+deps
