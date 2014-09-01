@@ -12,13 +12,13 @@ it is pretty sure you already discovered the `rebar escriptize` command.
 
 Unfortunately, it is almost sure you also discovered one of the following
 problems:
-* the escript doesn't start because you forgot to provide a `main/1' function
+* the escript doesn't start because you forgot to provide a `main/1` function
 * the escript doesn't contain the dependencies because you forgot to duplicate
-  the `deps' information into `escript_incl_apps'
-* you can't access your `priv' data at runtime
+  the `deps` information into `escript_incl_apps`
+* you can't access your `priv` data at runtime
 * you want to create an escript based on a release description, e.g. to contain
   two independent nifty services
 
-This is where the `rebar_escript_plugin' tries to help.
+This is where the `rebar_escript_plugin` tries to help.
 
 TODO
