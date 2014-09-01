@@ -217,7 +217,7 @@ create_escript(Ez, Config, AppFile) ->
     EScript = escript_path(OsFamily, Config, AppFile),
     HeartArg = "-heart",
     MainArg = "-escript main " ++ atom_to_list(?MAIN_MODULE),
-    EmuArgs = HeartArg ++ MainArg ++ " " ++ get_emu_args(Config),
+    EmuArgs = string:join([HeartArg, MainArg, get_emu_args(Config)], " "),
     Sections = [shebang, comment, {emu_args, EmuArgs}, {archive, Ez}],
     ok = escript:create(EScript, Sections),
     ok = set_executable(OsFamily, EScript).
