@@ -120,7 +120,7 @@ get_tmp(_OsFamily) ->
 %%------------------------------------------------------------------------------
 setup_heart(OsFamily, TempDir) ->
     case os:getenv("HEART_COMMAND") of
-        "" ->
+        Empty when Empty =:= false; Empty =:= "" ->
             HeartCmd = "";
         Cmd when OsFamily =:= nt; OsFamily =:= windows ->
             HeartCmd = " & " ++ Cmd;
