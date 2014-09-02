@@ -65,5 +65,6 @@ Examples
 --------
 
 The [serve_it](https://github.com/schlagert/serve_it) application is an example
-for an application that uses the plugin to create a standalone escript. For a
-release-based example refer to the `examples` directory.
+for an application that uses the plugin to create a standalone escript. The
+`examples` directory contains an example that packages the same application into
+an escript from a release perspective.
