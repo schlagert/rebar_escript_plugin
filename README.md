@@ -27,7 +27,7 @@ much, the plugin
 * provides a default main/1 function, starting all needed applications as a
   normal Erlang release would.
 * makes your application's `priv` directory contents accessible at runtime.
-* additionally allows escript creation *based on release specifications*.
+* additionally allows escript creation **based on release specifications**.
 
 Usage
 -----
